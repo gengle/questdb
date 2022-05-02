@@ -35,21 +35,24 @@ public class FileSplitterTest extends AbstractGriffinTest {
         assertMemoryLeak(() -> {
 
             FilesFacade ff = engine.getConfiguration().getFilesFacade();
-            //String inputDir = new File(".").getAbsolutePath();
-            String inputDir = new File("E:/dev/tmp").getAbsolutePath();
+            String inputDir = new File(".").getAbsolutePath();
+//            String inputDir = new File("E:/dev/tmp").getAbsolutePath();
 
-            //try (Path path = new Path().of(inputDir).slash().concat("src/test/resources/csv/test-import.csv").$();
-            try (Path path = new Path().of(inputDir).slash().concat("trips300mil.csv").$();
+            try (Path path = new Path().of(inputDir).slash().concat("src/test/resources/csv/test-import.csv").$();
+//            try (Path path = new Path().of(inputDir).slash().concat("trips300mil.csv").$();
                  FileSplitter splitter = new FileSplitter(engine)) {
 
-                DateFormat format = new TimestampFormatCompiler().compile("yyyy-MM-ddTHH:mm:ss.SSSUUUZ");
+                DateFormat format = new TimestampFormatCompiler().compile("yyyy-MM-ddTHH:mm:ss.UUUZ");
 
                 long fd = ff.openRO(path);
                 Assert.assertTrue(fd > -1);
 
                 try {
-                    //splitter.split("test-import-csv", fd, PartitionBy.MONTH, (byte) ',', 4, format, true);
-                    splitter.split("test-import-csv", fd, PartitionBy.MONTH, (byte) ',', 2, format, true);
+                    final long start = System.nanoTime();
+                    splitter.split1("test-import-csv", path, PartitionBy.MONTH, (byte) ',', 4, format, true);
+//                    splitter.split("test-import-csv", fd, PartitionBy.MONTH, (byte) ',', 4, format, true);
+                    final long stop = System.nanoTime();
+                    System.err.println("time: " + (stop - start));
                 } finally {
                     ff.close(fd);
                 }

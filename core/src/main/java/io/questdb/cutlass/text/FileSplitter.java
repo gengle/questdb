@@ -24,9 +24,14 @@
 
 package io.questdb.cutlass.text;
 
-import io.questdb.cairo.*;
+import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.CairoEngine;
+import io.questdb.cairo.CairoException;
+import io.questdb.cairo.PartitionBy;
 import io.questdb.cairo.vm.MemoryPMARImpl;
+import io.questdb.cairo.vm.Vm;
 import io.questdb.cairo.vm.api.MemoryMA;
+import io.questdb.cairo.vm.api.MemoryMR;
 import io.questdb.cutlass.text.types.TimestampAdapter;
 import io.questdb.cutlass.text.types.TypeManager;
 import io.questdb.griffin.SqlException;
@@ -151,45 +156,85 @@ public class FileSplitter implements Closeable, Mutable {
         this.dirMode = engine.getConfiguration().getMkDirMode();
     }
 
-    //timestampIndex - zero-based index of timestamp column 
-    public void split(CharSequence inputFileName, long fd, int partitionBy, byte columnDelimiter, int timestampIndex, DateFormat format, boolean ignoreHeader)
-            throws TextException, SqlException {
-
-        this.inputFileName = inputFileName;
-        this.partitionFloorMethod = PartitionBy.getPartitionFloorMethod(partitionBy);
-        this.partitionDirFormatMethod = PartitionBy.getPartitionDirFormatMethod(partitionBy);
-        this.offset = 0;
-        this.columnDelimiter = columnDelimiter;
-        this.timestampIndex = timestampIndex;
-        this.timestampAdapter = (TimestampAdapter) this.typeManager.nextTimestampAdapter(false, format, defaultDateLocale);
-        this.header = ignoreHeader;
-
-        createWorkDir(inputFileName);
-        LOG.info().$("Started indexing file ").$(inputFileName).$();
-
-        long buffer = Unsafe.malloc(bufferLength, MemoryTag.NATIVE_DEFAULT);
+    public void onTimestampField() {
+        long timestamp;
         try {
-            long fileLength = ff.length(fd);
-            long read = ff.read(fd, buffer, bufferLength, 0);
-
-            while (read > 0) {
-                parse(buffer, buffer + read);
-                offset += read;
-                read = (int) ff.read(fd, buffer, bufferLength, offset);
-            }
-
-            if (read < 0 || offset < fileLength) {
-                throw SqlException.$(/*model.getFileName().position*/1, "could not read file [errno=").put(ff.errno()).put(']');
-            } else {
-                parseLast();
-            }
-
-            LOG.info().$("Finished indexing file ").$(inputFileName).$();
-
-        } finally {
-            Unsafe.free(buffer, bufferLength, MemoryTag.NATIVE_DEFAULT);
-            clear();
+            timestamp = timestampAdapter.getTimestamp(timestampField);
+        } catch (Exception e) {
+            LOG.error().$("can't parse timestamp on line ").$(lineCount).$(" column ").$(timestampIndex).$();
+            errorCount++;
+            return;
         }
+
+        long lineStartOffset;
+        if (useFieldRollBuf) {
+            lineStartOffset = rolledFieldLineOffset;
+        } else {
+            lineStartOffset = offset + lastLineStart;
+        }
+        //long lineEndOffset = offset + lastLineStart;
+
+        long floor = partitionFloorMethod.floor(timestamp);
+
+        MemoryMA target = outputFiles.get(floor);
+        if (target == null) {
+            path.trimTo(plen);
+            path.slash().concat(inputFileName).slash();
+            partitionDirFormatMethod.format(floor, null, null, path);
+            path.put("_idx").$();
+
+            if (ff.exists(path)) {
+                //TODO: change exception type?
+                throw CairoException.instance(-1).put("index file already exists [path=").put(path).put(']');
+            } else {
+                LOG.info().$("created import index file ").$(path).$();
+            }
+
+            target = new MemoryPMARImpl(ff, path, ff.getPageSize(), MemoryTag.MMAP_DEFAULT, CairoConfiguration.O_NONE);
+            outputFiles.put(floor, target);
+            path.trimTo(plen);
+        }
+
+        target.putLong(timestamp);
+        target.putLong(lineStartOffset);
+//        System.err.println(lineStartOffset);
+        //target.putLong(lineEndOffset);
+    }
+
+    public void onTimestampField2(long lineStartOffset) {
+        long timestamp;
+        try {
+            timestamp = timestampAdapter.getTimestamp(timestampField);
+        } catch (Exception e) {
+            LOG.error().$("can't parse timestamp on line ").$(lineCount).$(" column ").$(timestampIndex).$();
+            errorCount++;
+            return;
+        }
+
+        long floor = partitionFloorMethod.floor(timestamp);
+        MemoryMA target = outputFiles.get(floor);
+        if (target == null) {
+            path.trimTo(plen);
+            path.slash().concat(inputFileName).slash();
+            partitionDirFormatMethod.format(floor, null, null, path);
+            path.put("_idx").$();
+
+            if (ff.exists(path)) {
+                //TODO: change exception type?
+                throw CairoException.instance(-1).put("index file already exists [path=").put(path).put(']');
+            } else {
+                LOG.info().$("created import index file ").$(path).$();
+            }
+
+            target = new MemoryPMARImpl(ff, path, ff.getPageSize(), MemoryTag.MMAP_DEFAULT, CairoConfiguration.O_NONE);
+            outputFiles.put(floor, target);
+            path.trimTo(plen);
+        }
+
+        target.putLong(timestamp);
+//        System.err.println(lineStartOffset);
+        target.putLong(lineStartOffset);
+        //target.putLong(lineEndOffset);
     }
 
     //TODO: we'll' need to lock dir or acquire table lock to make sure there are no two parallel user-issued imports of the same file 
@@ -354,6 +399,63 @@ public class FileSplitter implements Closeable, Mutable {
             this.fieldLo = this.fieldHi;
         }
     }
+//for (long int i = 0; i < buffer_size; i++){
+//    if (b[i] == escapechar){
+//        i++;
+//        continue;
+//    }
+//
+//    if (b[i] == quotechar){
+//        do{
+//            i++;
+//        } while (((b[i] != quotechar) || (b[i] == quotechar && b[i-1] == escapechar)) && i < buffer_size);
+//        continue;
+//    }
+//
+//    if (b[i] == '\n') {
+//        last_newline = i;
+//    }
+//}
+
+    public void split(CharSequence indexFileName, long fd, int partitionBy, byte columnDelimiter, int timestampIndex, DateFormat format, boolean ignoreHeader)
+            throws TextException, SqlException {
+
+        this.inputFileName = indexFileName;
+        this.partitionFloorMethod = PartitionBy.getPartitionFloorMethod(partitionBy);
+        this.partitionDirFormatMethod = PartitionBy.getPartitionDirFormatMethod(partitionBy);
+        this.offset = 0;
+        this.columnDelimiter = columnDelimiter;
+        this.timestampIndex = timestampIndex;
+        this.timestampAdapter = (TimestampAdapter) this.typeManager.nextTimestampAdapter(false, format, defaultDateLocale);
+        this.header = ignoreHeader;
+
+        createWorkDir(indexFileName);
+        LOG.info().$("Started indexing file ").$(indexFileName).$();
+
+        long buffer = Unsafe.malloc(bufferLength, MemoryTag.NATIVE_DEFAULT);
+        try {
+            long fileLength = ff.length(fd);
+            long read = ff.read(fd, buffer, bufferLength, 0);
+
+            while (read > 0) {
+                parse(buffer, buffer + read);
+                offset += read;
+                read = (int) ff.read(fd, buffer, bufferLength, offset);
+            }
+
+            if (read < 0 || offset < fileLength) {
+                throw SqlException.$(/*model.getFileName().position*/1, "could not read file [errno=").put(ff.errno()).put(']');
+            } else {
+                parseLast();
+            }
+
+            LOG.info().$("Finished indexing file ").$(indexFileName).$();
+
+        } finally {
+            Unsafe.free(buffer, bufferLength, MemoryTag.NATIVE_DEFAULT);
+            clear();
+        }
+    }
 
     private void parse(long lo, long hi) {
         this.fieldHi = useFieldRollBuf ? fieldRollBufCur : (this.fieldLo = lo);
@@ -476,47 +578,57 @@ public class FileSplitter implements Closeable, Mutable {
         this.lastLineStart = this.fieldLo - lo;
     }
 
-    public void onTimestampField() {
-        long timestamp;
-        try {
-            timestamp = timestampAdapter.getTimestamp(timestampField);
-        } catch (Exception e) {
-            LOG.error().$("can't parse timestamp on line ").$(lineCount).$(" column ").$(timestampIndex).$();
-            errorCount++;
-            return;
+    //timestampIndex - zero-based index of timestamp column
+    public void split1(CharSequence indexFileName, Path inputFileName, int partitionBy, byte columnDelimiter, int timestampIndex, DateFormat format, boolean ignoreHeader) throws TextException, SqlException {
+        try (MemoryMR memory = Vm.getMRInstance(ff, inputFileName, -1, MemoryTag.NATIVE_DEFAULT)) {
+            long fileLength = ff.length(memory.getFd());
+            this.inputFileName = indexFileName;
+            this.partitionFloorMethod = PartitionBy.getPartitionFloorMethod(partitionBy);
+            this.partitionDirFormatMethod = PartitionBy.getPartitionDirFormatMethod(partitionBy);
+            this.offset = 0;
+            this.columnDelimiter = columnDelimiter;
+            this.timestampIndex = timestampIndex;
+            this.timestampAdapter = (TimestampAdapter) this.typeManager.nextTimestampAdapter(false, format, defaultDateLocale);
+            this.header = ignoreHeader;
+            createWorkDir(indexFileName);
+            LOG.info().$("Started indexing file ").$(indexFileName).$();
+            parse2(memory.addressOf(0), memory.addressOf(0) + memory.size());
+            LOG.info().$("Finished indexing file ").$(indexFileName).$();
+        } finally {
+            clear();
         }
+    }
 
-        long lineStartOffset;
-        if (useFieldRollBuf) {
-            lineStartOffset = rolledFieldLineOffset;
-        } else {
-            lineStartOffset = offset + lastLineStart;
-        }
-        //long lineEndOffset = offset + lastLineStart;
-
-        long floor = partitionFloorMethod.floor(timestamp);
-
-        MemoryMA target = outputFiles.get(floor);
-        if (target == null) {
-            path.trimTo(plen);
-            path.slash().concat(inputFileName).slash();
-            partitionDirFormatMethod.format(floor, null, null, path);
-            path.put("_idx").$();
-
-            if (ff.exists(path)) {
-                //TODO: change exception type?
-                throw CairoException.instance(-1).put("index file already exists [path=").put(path).put(']');
-            } else {
-                LOG.info().$("created import index file ").$(path).$();
+    private void parse2(long lo, long hi) {
+        final sun.misc.Unsafe unsafe = Unsafe.getUnsafe();
+        long v = 0;
+        long ptr = lo;
+        while (ptr < hi) {
+            final byte c = unsafe.getByte(ptr);
+            if (c == '"') {
+                do {
+                    ptr++;
+                } while (ptr < hi && (unsafe.getByte(ptr) != '"' || unsafe.getByte(ptr - 1) == '"'));
+                continue;
             }
-
-            target = new MemoryPMARImpl(ff, path, ff.getPageSize(), MemoryTag.MMAP_DEFAULT, CairoConfiguration.O_NONE);
-            outputFiles.put(floor, target);
-            path.trimTo(plen);
+            if (c == ',') {
+                if (++fieldIndex == timestampIndex && !header) {
+                    long start = ptr + 1;
+                    do {
+                        ptr++;
+                    } while (ptr < hi && (unsafe.getByte(ptr) != ',' || unsafe.getByte(ptr) == '\n'));
+                    timestampField.of(start, ptr);
+                    onTimestampField2(lastLineStart - lo);
+                }
+            }
+            if (c == '\n') {
+                lastLineStart = ptr + 1;
+                fieldIndex = 0;
+                if (header) {
+                    header = false;
+                }
+            }
+            ptr++;
         }
-
-        target.putLong(timestamp);
-        target.putLong(lineStartOffset);
-        //target.putLong(lineEndOffset);
     }
 }
