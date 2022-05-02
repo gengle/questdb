@@ -599,6 +599,7 @@ public class FileSplitter implements Closeable, Mutable {
         }
     }
 
+
     private void parse2(long lo, long hi) {
         final sun.misc.Unsafe unsafe = Unsafe.getUnsafe();
         long v = 0;
@@ -616,12 +617,12 @@ public class FileSplitter implements Closeable, Mutable {
                     long start = ptr + 1;
                     do {
                         ptr++;
-                    } while (ptr < hi && (unsafe.getByte(ptr) != ',' || unsafe.getByte(ptr) == '\n'));
-                    timestampField.of(start, ptr);
+                    } while (ptr < hi && (unsafe.getByte(ptr) != ',' || unsafe.getByte(ptr) == '\n' || unsafe.getByte(ptr) == '\r'));
+                    timestampField.of(start, ptr); // start >= hi???
                     onTimestampField2(lastLineStart - lo);
                 }
             }
-            if (c == '\n') {
+            if (c == '\n' || c == '\r') {
                 lastLineStart = ptr + 1;
                 fieldIndex = 0;
                 if (header) {
