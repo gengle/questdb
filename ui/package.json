@@ -43,7 +43,7 @@
     "date-fns": "2.14.0",
     "docsearch.js": "2.6.3",
     "dotenv": "^10.0.0",
-    "echarts": "^5.2.2",
+    "echarts": "^6.1.0",
     "glyphicons-halflings": "1.9.1",
     "jquery": "3.5.1",
     "monaco-editor": "^0.30.1",
